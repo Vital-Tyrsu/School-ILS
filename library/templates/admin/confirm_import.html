@@ -1,0 +1,23 @@
+<!-- library/templates/admin/confirm_import.html -->
+{% extends "admin/base_site.html" %}
+{% block content %}
+<h1>Confirm Book Import</h1>
+<p><strong>Title:</strong> {{ book_data.title }}</p>
+<p><strong>Author:</strong> {{ book_data.author }}</p>
+<p><strong>ISBN:</strong> {{ book_data.isbn }}</p>
+<p><strong>Publisher:</strong> {{ book_data.publisher }}</p>
+<p><strong>Publication Year:</strong> {{ book_data.publication_year }}</p>
+
+<form method="post" action="{% url 'confirm_import' %}">
+    {% csrf_token %}
+    <label for="num_copies">Number of Copies:</label>
+    <input type="number" name="num_copies" id="num_copies" value="1" min="1"><br>
+    <label for="condition">Condition:</label>
+    <select name="condition" id="condition">
+        <option value="good">Good</option>
+        <option value="damaged">Damaged</option>
+        <!-- Add more options as needed -->
+    </select><br>
+    <button type="submit">Confirm and Import</button>
+</form>
+{% endblock %}

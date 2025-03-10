@@ -1,0 +1,18 @@
+<!-- library/templates/admin/import_book.html -->
+{% extends "admin/base_site.html" %}
+{% block content %}
+<h1>Import Book</h1>
+<form method="post" action="{% url 'import_book' %}">
+    {% csrf_token %}
+    <label for="isbn">ISBN:</label>
+    <input type="text" name="isbn" id="isbn" required><br>
+    <button type="submit">Fetch Book</button>
+</form>
+{% if messages %}
+    <ul>
+        {% for message in messages %}
+            <li>{{ message }}</li>
+        {% endfor %}
+    </ul>
+{% endif %}
+{% endblock %}
