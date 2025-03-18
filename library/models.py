@@ -1,3 +1,5 @@
+# File: library/models.py
+
 from django.db import models
 from django.contrib.auth.models import AbstractUser
 from django.core.validators import RegexValidator
@@ -84,27 +86,42 @@ class Reservation(models.Model):
         return f"{self.user.username} - {self.book.title} ({self.status})"
 
     def check_expiration(self):
-        if self.status == 'assigned' and timezone.now() > self.expiration_date:
+        print(f"check_expiration: Checking reservation {self.id}, status: {self.status}, expiration_date: {self.expiration_date}, now: {timezone.now()}")
+        if self.status == 'assigned' and self.expiration_date and timezone.now() > self.expiration_date:
+            print(f"check_expiration: Reservation {self.id} has expired")
             self.status = 'expired'
-            self.copy = None
+            if self.copy:
+                print(f"check_expiration: Making copy {self.copy} available")
+                self.copy.status = 'available'
+                self.copy.save()
+                self.copy = None  # Clear the copy from the reservation
             self.save()
+            print(f"check_expiration: Updated reservation {self.id} to status: {self.status}")
             return True
+        print(f"check_expiration: Reservation {self.id} not expired")
         return False
 
     def assign_available_copy(self):
+        print(f"assign_available_copy: Processing reservation {self.id} for book {self.book.title}, current status: {self.status}")
         if self.status == 'pending' and not self.copy:
             # Find an available copy of the SAME book
             available_copy = BookCopy.objects.filter(
-                book=self.book,  # Match the copy to the reserved book
+                book=self.book,
                 status='available'
             ).first()
             if available_copy:
+                print(f"assign_available_copy: Found available copy {available_copy} for book {self.book.title}")
                 self.copy = available_copy
                 self.status = 'assigned'
-                available_copy.status = 'unavailable'  # Mark the copy as taken
+                available_copy.status = 'reserved'  # Match your BookCopy status choices
                 available_copy.save()
                 self.save()
+                print(f"assign_available_copy: Assigned copy {available_copy} to reservation {self.id}, new status: {self.status}")
                 return True
+            else:
+                print(f"assign_available_copy: No available copy found for book {self.book.title}")
+        else:
+            print(f"assign_available_copy: Skipped reservation {self.id} (status: {self.status}, copy: {self.copy})")
         return False
 
     def cancel(self):
@@ -154,21 +171,14 @@ class Borrowing(models.Model):
 
     def return_book(self):
         if self.return_date is None:
-            # Set the return date to now
             self.return_date = timezone.now()
-            
-            # Update the copy's status to 'available'
             if self.copy:
+                print(f"Setting copy {self.copy.id} status to 'available' before save")
                 self.copy.status = 'available'
                 self.copy.save()
-            
-            # Update the reservation's is_completed to True
-            if self.reservation:
-                self.reservation.is_completed = True
-                self.reservation.save(update_fields=['is_completed'])
-            
-            # Save the borrowing with the new return_date
+                print(f"Copy {self.copy.id} status after save: {self.copy.status}")
             self.save()
+            print(f"Return date set for Borrowing {self.id}")
 
     def renew(self):
         if self.renewal_count >= 2:
@@ -180,7 +190,7 @@ class Borrowing(models.Model):
         self.save()
         return True
 
-# Signals (unchanged from previous setup)
+# Signals
 @receiver(pre_save, sender=Reservation)
 def capture_old_status(sender, instance, **kwargs):
     if instance.pk:
@@ -202,16 +212,20 @@ def handle_picked_up(sender, instance, **kwargs):
             copy=instance.copy,
             borrow_date=timezone.now(),
             due_date=timezone.now() + timezone.timedelta(days=14),
-            renewal_count=0
+            renewal_count=0,
+            reservation=instance
         )
+        instance.copy.status = 'borrowed'
+        instance.copy.save()
+        print(f"Created borrowing for reservation {instance.id}, set copy {instance.copy.id} to borrowed")
 
 @receiver(post_save, sender=Reservation)
 def try_assign_copy(sender, instance, created, **kwargs):
     if kwargs.get('raw', False):  # Skip during migrations/fixtures
         return
     print(f"try_assign_copy: Running for reservation {instance.id}, created={created}, status={instance.status}")
-    if created or instance.status == 'pending':
+    if instance.status == 'pending':  # Run whenever status is 'pending'
         assigned = instance.assign_available_copy()
         print(f"try_assign_copy: Assignment result for reservation {instance.id}: {assigned}")
     else:
-        print(f"try_assign_copy: Skipped for reservation {instance.id}, not pending")
+        print(f"try_assign_copy: Skipped for reservation {instance.id}, status is not pending")

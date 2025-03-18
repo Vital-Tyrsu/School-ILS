@@ -136,10 +136,9 @@ class BorrowingAdmin(admin.ModelAdmin):
     list_display = ('user', 'copy', 'borrow_date', 'due_date', 'return_date', 'renewal_count')
     list_filter = ('return_date',)
     search_fields = ('user__username', 'copy__book__title')
-    form = BorrowingForm  # Optional, remove if not used
+    form = BorrowingForm
     actions = ['renew_borrowing', 'return_borrowing']
 
-    # Action to renew borrowings
     def renew_borrowing(self, request, queryset):
         renewed = 0
         failed = 0
@@ -147,7 +146,7 @@ class BorrowingAdmin(admin.ModelAdmin):
             try:
                 borrowing.renew()
                 renewed += 1
-            except Exception as e:
+            except ValidationError as e:
                 failed += 1
                 messages.error(request, f"Failed to renew {borrowing}: {str(e)}")
         if renewed:
@@ -156,10 +155,8 @@ class BorrowingAdmin(admin.ModelAdmin):
             messages.warning(request, f"Failed to renew {failed} borrowing(s).")
     renew_borrowing.short_description = "Renew selected borrowings"
 
-    # Action to return borrowings
     def return_borrowing(self, request, queryset):
         for borrowing in queryset:
-            print(f"Attempting to return Borrowing {borrowing.id} with reservation: {borrowing.reservation}")
             borrowing.return_book()
             messages.success(request, f"Returned {borrowing.copy}.")
     return_borrowing.short_description = "Return selected borrowings"

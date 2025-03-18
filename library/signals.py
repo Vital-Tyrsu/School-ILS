@@ -30,24 +30,27 @@ def check_pending_reservations(sender, instance, **kwargs):
     else:
         print(f"Copy {instance.id} status is {instance.status}, not processing")
 
+# File: library/signals.py
+
+
 @receiver(post_save, sender=Reservation)
 def try_assign_copy(sender, instance, created, **kwargs):
     if kwargs.get('raw', False):  # Skip during migrations/fixtures
         return
-    print(f"try_assign_copy: Running for reservation {instance.id}, created={created}, status={instance.status}")
     if created or instance.status == 'pending':
-        assigned = instance.assign_available_copy()
-        print(f"try_assign_copy: Assignment result for reservation {instance.id}: {assigned}")
-    else:
-        print(f"try_assign_copy: Skipped for reservation {instance.id}, not pending")
+        instance.assign_available_copy()
 
 
 @receiver(post_save, sender=Borrowing)
 def try_assign_after_return(sender, instance, **kwargs):
     if kwargs.get('raw', False):  # Skip during migrations/fixtures
         return
-    if instance.return_date:  # Only trigger if the book has been returned
-        print(f"try_assign_after_return: Borrowing {instance.id} returned, checking for pending reservations")
+    if instance.return_date and instance.copy:  # Only trigger if the book has been returned
+        print(f"try_assign_after_return: Borrowing {instance.id} returned, copy {instance.copy} set to available")
+        # Ensure the copy is available
+        instance.copy.status = 'available'
+        instance.copy.save()
+        # Try to assign the copy to a pending reservation
         pending_reservations = Reservation.objects.filter(status='pending').order_by('reservation_date')
         for reservation in pending_reservations:
             print(f"try_assign_after_return: Attempting to assign copy to reservation {reservation.id} for book {reservation.book.title}")
