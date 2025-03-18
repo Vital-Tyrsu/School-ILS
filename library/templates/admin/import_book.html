@@ -6,8 +6,125 @@
     {% csrf_token %}
     <label for="isbn">ISBN:</label>
     <input type="text" name="isbn" id="isbn" required><br>
-    <button type="submit">Fetch Book</button>
+    <button type="button" id="scan-button" style="margin-top: 10px; background-color: #417690; color: white; padding: 8px 15px; border: none; border-radius: 4px; cursor: pointer;">
+        <span style="margin-right: 5px;">📷</span> Scan ISBN
+    </button>
+    <button type="submit" style="margin-top: 10px; margin-left: 10px;">Fetch Book</button>
 </form>
+
+<!-- Barcode scanner modal -->
+<div id="scanner-modal" style="display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.7);">
+    <div style="background-color: white; margin: 10% auto; padding: 20px; width: 80%; max-width: 600px; border-radius: 5px;">
+        <div style="display: flex; justify-content: space-between; margin-bottom: 15px;">
+            <h2 style="margin: 0;">Scan ISBN Barcode</h2>
+            <button id="close-scanner" style="background: none; border: none; font-size: 20px; cursor: pointer;">×</button>
+        </div>
+        <div id="video-container" style="width: 100%; margin-bottom: 15px;">
+            <video id="scanner-video" style="width: 100%; border: 1px solid #ddd;"></video>
+        </div>
+        <div id="scan-result" style="margin-top: 10px; min-height: 30px;"></div>
+    </div>
+</div>
+
+<!-- Include QuaggaJS library -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/quagga/0.12.1/quagga.min.js"></script>
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        // Get references to DOM elements
+        const scanButton = document.getElementById('scan-button');
+        const scannerModal = document.getElementById('scanner-modal');
+        const closeScanner = document.getElementById('close-scanner');
+        const video = document.getElementById('scanner-video');
+        const scanResult = document.getElementById('scan-result');
+        const isbnInput = document.getElementById('isbn');
+        
+        let stream = null;
+        
+        // Open scanner modal when "Scan ISBN" button is clicked
+        scanButton.addEventListener('click', function() {
+            scannerModal.style.display = 'block';
+            startCamera();
+        });
+        
+        // Close scanner modal when close button is clicked
+        closeScanner.addEventListener('click', function() {
+            scannerModal.style.display = 'none';
+            stopCamera();
+        });
+        
+        // Start camera and display video feed
+        function startCamera() {
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                navigator.mediaDevices.getUserMedia({ 
+                    video: { 
+                        facingMode: 'environment', // Use the rear camera
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 }
+                    } 
+                })
+                .then(function(s) {
+                    stream = s;
+                    video.srcObject = stream;
+                    video.play();
+                    
+                    // Start scanning for barcodes
+                    scanBarcode();
+                })
+                .catch(function(error) {
+                    scanResult.textContent = "Camera access error: " + error.message;
+                });
+            } else {
+                scanResult.textContent = "Your browser doesn't support camera access.";
+            }
+        }
+        
+        // Stop camera and video feed
+        function stopCamera() {
+            if (stream) {
+                stream.getTracks().forEach(track => {
+                    track.stop();
+                });
+                video.srcObject = null;
+                stream = null;
+            }
+        }
+        
+        // Scan barcode using QuaggaJS
+        function scanBarcode() {
+            Quagga.init({
+                inputStream: {
+                    name: "Live",
+                    type: "LiveStream",
+                    target: video, // Use the video element as the target
+                    constraints: {
+                        facingMode: "environment" // Use the rear camera
+                    }
+                },
+                decoder: {
+                    readers: ["ean_reader"] // Use the EAN reader for ISBN barcodes
+                }
+            }, function(err) {
+                if (err) {
+                    console.log(err);
+                    scanResult.textContent = "Error initializing Quagga: " + err.message;
+                    return;
+                }
+                Quagga.start();
+            });
+
+            // Handle detected barcode
+            Quagga.onDetected(function(result) {
+                const isbn = result.codeResult.code;
+                scanResult.innerHTML = `<strong>Found ISBN:</strong> ${isbn}`;
+                isbnInput.value = isbn;
+                Quagga.stop();
+                scannerModal.style.display = 'none';
+                stopCamera();
+            });
+        }
+    });
+</script>
+
 {% if messages %}
     <ul>
         {% for message in messages %}

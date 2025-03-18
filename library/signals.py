@@ -1,35 +1,76 @@
-# library/signals.py
-from django.db.models.signals import post_save
+from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
 from django.core.mail import send_mail
 from .models import Reservation, BookCopy, Borrowing
-
-@receiver(post_save, sender=Reservation)
-def assign_copy_to_reservation(sender, instance, created, **kwargs):
-    if created and instance.status == 'pending':
-        available_copy = BookCopy.objects.filter(book=instance.book, status='available').first()
-        if available_copy:
-            instance.copy = available_copy
-            instance.status = 'assigned'
-            instance.save()
-            available_copy.status = 'reserved'
-            available_copy.save()
+from django.contrib.auth.models import User
+from django.utils import timezone
 
 @receiver(post_save, sender=BookCopy)
 def check_pending_reservations(sender, instance, **kwargs):
+    if kwargs.get('raw', False):
+        print("Skipping raw data load")
+        return
+    print(f"Signal triggered for copy {instance.id}, status: {instance.status}, created: {kwargs.get('created', False)}")
     if instance.status == 'available':
-        pending_reservation = Reservation.objects.filter(book=instance.book, status='pending').first()
-        if pending_reservation:
-            pending_reservation.copy = instance
-            pending_reservation.status = 'assigned'
-            pending_reservation.save()
+        pending_reservations = Reservation.objects.filter(
+            book=instance.book, status='pending'
+        ).order_by('reservation_date')
+        print(f"Found {pending_reservations.count()} pending reservations for book {instance.book.title}")
+        if pending_reservations.exists():
+            reservation = pending_reservations.first()
+            print(f"Assigning copy {instance.id} to reservation {reservation.id} for user {reservation.user.username}")
+            reservation.copy = instance
+            reservation.status = 'assigned'
+            reservation.save(update_fields=['copy', 'status'])
             instance.status = 'reserved'
-            instance.save()
+            instance.save(update_fields=['status'])
+            print(f"Successfully assigned copy {instance.id} to reservation {reservation.id}")
+        else:
+            print(f"No pending reservations found for book {instance.book.title}")
+    else:
+        print(f"Copy {instance.id} status is {instance.status}, not processing")
+
+@receiver(post_save, sender=Reservation)
+def try_assign_copy(sender, instance, created, **kwargs):
+    if kwargs.get('raw', False):  # Skip during migrations/fixtures
+        return
+    print(f"try_assign_copy: Running for reservation {instance.id}, created={created}, status={instance.status}")
+    if created or instance.status == 'pending':
+        assigned = instance.assign_available_copy()
+        print(f"try_assign_copy: Assignment result for reservation {instance.id}: {assigned}")
+    else:
+        print(f"try_assign_copy: Skipped for reservation {instance.id}, not pending")
+
+
+@receiver(post_save, sender=Borrowing)
+def try_assign_after_return(sender, instance, **kwargs):
+    if kwargs.get('raw', False):  # Skip during migrations/fixtures
+        return
+    if instance.return_date:  # Only trigger if the book has been returned
+        print(f"try_assign_after_return: Borrowing {instance.id} returned, checking for pending reservations")
+        pending_reservations = Reservation.objects.filter(status='pending').order_by('reservation_date')
+        for reservation in pending_reservations:
+            print(f"try_assign_after_return: Attempting to assign copy to reservation {reservation.id} for book {reservation.book.title}")
+            if reservation.assign_available_copy():
+                print(f"try_assign_after_return: Assigned copy to reservation {reservation.id}")
+                break  # Assign to the first eligible pending reservation
+
+
+# Optional: Add a signal for when a Borrowing is saved to trigger reassignment
+@receiver(post_save, sender=Borrowing)
+def handle_borrowing_return(sender, instance, **kwargs):
+    if instance.return_date and not kwargs.get('raw', False):  # Only trigger on return
+        print(f"handle_borrowing_return: Borrowing {instance.id} returned, triggering reassignment")
+        pending_reservations = Reservation.objects.filter(status='pending').order_by('reservation_date')
+        for reservation in pending_reservations:
+            if reservation.assign_available_copy():
+                print(f"handle_borrowing_return: Assigned copy to reservation {reservation.id}")
+                break
+
 
 @receiver(post_save, sender=Reservation)
 def send_reservation_email(sender, instance, created, **kwargs):
     if created and instance.status == 'pending':
-        # Email when reservation is created
         subject = 'Reservation Confirmation'
         message = (
             f'Dear {instance.user.username},\n\n'
@@ -39,8 +80,17 @@ def send_reservation_email(sender, instance, created, **kwargs):
         )
         send_mail(subject, message, 'from@example.com', [instance.user.email], fail_silently=True)
 
+    elif instance.status == 'assigned':
+        subject = 'Book Assigned - Ready for Pickup'
+        message = (
+            f'Dear {instance.user.username},\n\n'
+            f'A copy of "{instance.book.title}" has been assigned to your reservation.\n'
+            f'Please pick it up by {instance.expiration_date.strftime("%Y-%m-%d")}.\n'
+            f'Thank you!'
+        )
+        send_mail(subject, message, 'from@example.com', [instance.user.email], fail_silently=True)
+
     elif instance.status == 'picked_up':
-        # Email when book is picked up, including borrowing period
         borrowing = Borrowing.objects.filter(reservation=instance).first()
         if borrowing:
             due_date = borrowing.due_date.strftime('%Y-%m-%d')
@@ -52,3 +102,20 @@ def send_reservation_email(sender, instance, created, **kwargs):
                 f'Thank you!'
             )
             send_mail(subject, message, 'from@example.com', [instance.user.email], fail_silently=True)
+
+    elif instance.status == 'expired':
+        subject = 'Reservation Expired'
+        message = (
+            f'Dear {instance.user.username},\n\n'
+            f'Your reservation for "{instance.book.title}" has been expired as of '
+            f'{instance.expiration_date.strftime("%Y-%m-%d")}.\n'
+            f'Please place a new reservation if you still need the book.\n\n'
+            f'Thank you!'
+        )
+        send_mail(subject, message, 'from@example.com', [instance.user.email], fail_silently=True)
+
+@receiver(post_delete, sender=User)
+def cancel_user_reservations(sender, instance, **kwargs):
+    reservations = Reservation.objects.filter(user=instance)
+    for reservation in reservations:
+        reservation.cancel()

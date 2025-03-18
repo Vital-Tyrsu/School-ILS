@@ -6,9 +6,9 @@ from django.db.models.signals import pre_save, post_save
 from django.dispatch import receiver
 from datetime import timedelta
 from django.core.exceptions import ValidationError
-from django.contrib import messages
+from auditlog.registry import auditlog
 
-# User Model
+# User Model (unchanged)
 class User(AbstractUser):
     ROLE_CHOICES = (('student', 'Student'), ('teacher', 'Teacher'), ('admin', 'Admin'))
     email = models.EmailField(unique=True, verbose_name="Email Address")
@@ -17,7 +17,7 @@ class User(AbstractUser):
     def __str__(self):
         return self.username
 
-# Book Model
+# Book Model (unchanged)
 class Book(models.Model):
     title = models.CharField(max_length=255, verbose_name="Book Title")
     author = models.CharField(max_length=255, verbose_name="Author Name")
@@ -38,8 +38,13 @@ class Book(models.Model):
     def __str__(self):
         return self.title
 
-# BookCopy Model
+# BookCopy Model (unchanged)
 class BookCopy(models.Model):
+    STATUS_CHOICES = (
+        ('available', 'Available'),
+        ('reserved', 'Reserved'),
+        ('borrowed', 'Borrowed'),
+    )
     book = models.ForeignKey(Book, on_delete=models.CASCADE, verbose_name="Book")
     condition = models.CharField(
         max_length=50, default='good', verbose_name="Condition", help_text="e.g., good, damaged"
@@ -49,6 +54,9 @@ class BookCopy(models.Model):
         validators=[RegexValidator(r'^[A-Z0-9]+-[A-Z]-[0-9]{2}$', message='Use format like L1-A-12')],
         verbose_name="Location",
         help_text="Use format Room-Shelf-Number (e.g., L1-A-12)"
+    )
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default='available', verbose_name="Status", db_index=True
     )
 
     def __str__(self):
@@ -64,8 +72,8 @@ class Reservation(models.Model):
         ('canceled', 'Canceled')
     )
     user = models.ForeignKey(User, on_delete=models.CASCADE, verbose_name="User")
-    book = models.ForeignKey(Book, on_delete=models.CASCADE, verbose_name="Book")
-    copy = models.ForeignKey(BookCopy, on_delete=models.CASCADE, null=True, blank=True, verbose_name="Copy")
+    book = models.ForeignKey('Book', on_delete=models.CASCADE, verbose_name="Book")
+    copy = models.ForeignKey('BookCopy', on_delete=models.CASCADE, null=True, blank=True, verbose_name="Copy")
     reservation_date = models.DateTimeField(auto_now_add=True, verbose_name="Reservation Date")
     expiration_date = models.DateTimeField(verbose_name="Expiration Date", help_text="e.g., 2025-03-13")
     status = models.CharField(
@@ -73,10 +81,10 @@ class Reservation(models.Model):
     )
 
     def __str__(self):
-        return f"{self.user.username} - {self.book.title}"
+        return f"{self.user.username} - {self.book.title} ({self.status})"
 
     def check_expiration(self):
-        if self.status == 'assigned' and self.expiration_date < timezone.now():
+        if self.status == 'assigned' and timezone.now() > self.expiration_date:
             self.status = 'expired'
             self.copy = None
             self.save()
@@ -84,22 +92,34 @@ class Reservation(models.Model):
         return False
 
     def assign_available_copy(self):
-        if self.status == 'pending':
-            available_copies = BookCopy.objects.filter(book=self.book).exclude(
-                id__in=Reservation.objects.filter(
-                    status__in=['assigned', 'picked_up']
-                ).values_list('copy_id', flat=True)
-            ).exclude(
-                id__in=Borrowing.objects.filter(return_date__isnull=True).values_list('copy_id', flat=True)
-            )
-            if available_copies.exists():
-                self.copy = available_copies.first()
+        if self.status == 'pending' and not self.copy:
+            # Find an available copy of the SAME book
+            available_copy = BookCopy.objects.filter(
+                book=self.book,  # Match the copy to the reserved book
+                status='available'
+            ).first()
+            if available_copy:
+                self.copy = available_copy
                 self.status = 'assigned'
+                available_copy.status = 'unavailable'  # Mark the copy as taken
+                available_copy.save()
                 self.save()
                 return True
         return False
 
-# Borrowing Model
+    def cancel(self):
+        if self.status in ['assigned', 'picked_up'] and self.copy:
+            print(f"Canceling reservation {self.id}, setting copy {self.copy.id} to available")
+            self.copy.status = 'available'
+            self.copy.save()
+            print(f"Copy {self.copy.id} status after cancel: {self.copy.status}")
+        self.copy = None
+        self.status = 'canceled'
+        self.save()
+
+auditlog.register(Reservation)
+
+# Borrowing Model (unchanged)
 class Borrowing(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, verbose_name="User")
     copy = models.ForeignKey(BookCopy, on_delete=models.CASCADE, verbose_name="Copy")
@@ -107,14 +127,19 @@ class Borrowing(models.Model):
     due_date = models.DateTimeField(verbose_name="Due Date")
     return_date = models.DateTimeField(null=True, blank=True, verbose_name="Return Date")
     renewal_count = models.IntegerField(default=0, verbose_name="Renewal Count")
+    reservation = models.OneToOneField(
+        'Reservation',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        verbose_name="Related Reservation",
+        help_text="The reservation that initiated this borrowing, if applicable."
+    )
 
     def __str__(self):
         return f"{self.user.username} - {self.copy}"
 
     def clean(self):
-        """
-        Validate the due_date change to enforce renewal limits.
-        """
         if self.pk:
             old_instance = Borrowing.objects.get(pk=self.pk)
             if old_instance.due_date != self.due_date:
@@ -129,14 +154,23 @@ class Borrowing(models.Model):
 
     def return_book(self):
         if self.return_date is None:
+            # Set the return date to now
             self.return_date = timezone.now()
+            
+            # Update the copy's status to 'available'
+            if self.copy:
+                self.copy.status = 'available'
+                self.copy.save()
+            
+            # Update the reservation's is_completed to True
+            if self.reservation:
+                self.reservation.is_completed = True
+                self.reservation.save(update_fields=['is_completed'])
+            
+            # Save the borrowing with the new return_date
             self.save()
 
     def renew(self):
-        """
-        Renew the borrowing by extending the due_date by 14 days and incrementing renewal_count.
-        Raises ValidationError if conditions are not met.
-        """
         if self.renewal_count >= 2:
             raise ValidationError("Maximum number of renewals (2) reached.")
         if self.return_date is not None:
@@ -146,7 +180,7 @@ class Borrowing(models.Model):
         self.save()
         return True
 
-# Signals for Reservation
+# Signals (unchanged from previous setup)
 @receiver(pre_save, sender=Reservation)
 def capture_old_status(sender, instance, **kwargs):
     if instance.pk:
@@ -173,7 +207,11 @@ def handle_picked_up(sender, instance, **kwargs):
 
 @receiver(post_save, sender=Reservation)
 def try_assign_copy(sender, instance, created, **kwargs):
+    if kwargs.get('raw', False):  # Skip during migrations/fixtures
+        return
+    print(f"try_assign_copy: Running for reservation {instance.id}, created={created}, status={instance.status}")
     if created or instance.status == 'pending':
-        instance.assign_available_copy()
-
-# Remove the old handle_manual_renewal signal since we're using clean() now
+        assigned = instance.assign_available_copy()
+        print(f"try_assign_copy: Assignment result for reservation {instance.id}: {assigned}")
+    else:
+        print(f"try_assign_copy: Skipped for reservation {instance.id}, not pending")
